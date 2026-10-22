@@ -2,18 +2,22 @@ const express = require("express");
 const path = require("node:path");
 
 const app = express();
-const key = process.env.ROUTER_API_KEY;
-const model = process.env.ROUTER_MODEL;
-
-if (!key || !model) {
-  console.error("Bạn chưa điền key hoặc model trong file .env");
-  process.exit(1);
-}
 
 app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.post("/api/chat", async (req, res) => {
+  const key = process.env.ROUTER_API_KEY?.trim();
+  const model = process.env.ROUTER_MODEL
+    ?.trim()
+    .replace(/^gemini\//, "");
+
+  if (!key || !model) {
+    return res.status(500).json({
+      error: "Thiếu ROUTER_API_KEY hoặc ROUTER_MODEL trên Vercel."
+    });
+  }
+
   const messages = req.body?.messages;
 
   if (
@@ -34,7 +38,7 @@ app.post("/api/chat", async (req, res) => {
 
   try {
     const response = await fetch(
-      `${process.env.ROUTER_BASE_URL.replace(/\/$/, "")}/chat/completions`,
+      "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
       {
         method: "POST",
         headers: {
@@ -46,7 +50,7 @@ app.post("/api/chat", async (req, res) => {
           messages,
           stream: false
         }),
-        signal: AbortSignal.timeout(120000)
+        signal: AbortSignal.timeout(50000)
       }
     );
 
@@ -57,35 +61,44 @@ app.post("/api/chat", async (req, res) => {
       data = JSON.parse(raw);
     } catch {
       throw new Error(
-        `9router trả về dữ liệu không hợp lệ (HTTP ${response.status}).`
+        `Google trả về dữ liệu không hợp lệ (HTTP ${response.status}).`
       );
     }
 
     if (!response.ok) {
-      const detail = data.error?.message || data.error;
-      throw new Error(
-        typeof detail === "string"
-          ? detail
-          : `9router báo lỗi HTTP ${response.status}`
-      );
+      return res.status(response.status).json({
+        error: response.status === 429
+          ? "Model Gemini hết hoặc chưa có quota. Kiểm tra hạn mức Google AI Studio."
+          : data.error?.message || `Google báo lỗi HTTP ${response.status}.`
+      });
     }
 
     const reply = data.choices?.[0]?.message?.content;
 
     if (typeof reply !== "string" || !reply.trim()) {
-      throw new Error("Model chưa trả về câu trả lời bằng văn bản.");
+      throw new Error("Gemini chưa trả về nội dung văn bản.");
     }
 
-    res.json({ reply });
+    return res.json({ reply });
   } catch (error) {
     console.error(error.message);
 
-    res.status(502).json({
+    return res.status(502).json({
       error: error.message === "fetch failed"
-        ? "Không kết nối được 9router. Kiểm tra 9router còn chạy không."
-        : error.message
+        ? "Không kết nối được API Google Gemini."
+        : error.name === "TimeoutError"
+          ? "Gemini phản hồi quá lâu. Bạn thử lại nhé."
+          : error.message
     });
   }
 });
 
+// Chạy trên máy khi mở trực tiếp file này.
+if (require.main === module) {
+  app.listen(3000, "127.0.0.1", () => {
+    console.log("Website: http://127.0.0.1:3000");
+  });
+}
+
+// Cho Vercel sử dụng.
 module.exports = app;
